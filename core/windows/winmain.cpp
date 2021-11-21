@@ -724,7 +724,7 @@ static bool dumpCallback(const wchar_t* dump_path,
 #ifdef TARGET_UWP
 extern "C" int SDL_main(int argc, char* argv[])
 {
-
+	SDL_SetHint(SDL_HINT_WINRT_HANDLE_BACK_BUTTON, "1");
 	// DEF_CONSOLE allows you to override linker subsystem and therefore default console //
 	//	: pragma isn't pretty but def's are configurable 
 #elif defined(DEF_CONSOLE)
