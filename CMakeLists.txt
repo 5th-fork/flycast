@@ -24,6 +24,7 @@ if(APPLE)
 	if(CMAKE_SYSTEM_NAME STREQUAL iOS)
 		set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum iOS deployment version")
 		set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "")
+		set(USE_VULKAN OFF CACHE BOOL "Force vulkan off" FORCE)
 	else()
 		set(CMAKE_OSX_DEPLOYMENT_TARGET "10.9" CACHE STRING "Minimum macOS deployment version")
 		set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "")
@@ -119,17 +120,28 @@ else()
     add_executable(${PROJECT_NAME} MACOSX_BUNDLE core/emulator.cpp)
 endif()
 
-target_compile_features(${PROJECT_NAME} PRIVATE c_std_11 cxx_std_11)
+if(WINDOWS_STORE)
+    target_compile_features(${PROJECT_NAME} PRIVATE c_std_11 cxx_std_17)
+else()
+    target_compile_features(${PROJECT_NAME} PRIVATE c_std_11 cxx_std_11)
+endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES
 	CXX_EXTENSIONS OFF
 	LINK_FLAGS_RELEASE -s)
 if(MSVC)
 	target_compile_options(${PROJECT_NAME} PRIVATE /GR- /GS-)
+	if(WINDOWS_STORE)
+		target_compile_definitions(${PROJECT_NAME} PRIVATE _WIN32_WINNT=0x0A00)
+		target_compile_options(${PROJECT_NAME} PRIVATE /ZW)
+	endif()
 else()
 	target_compile_options(${PROJECT_NAME} PRIVATE
-		$<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
 		$<$<COMPILE_LANGUAGE:CXX>:-fno-strict-aliasing>
 		$<$<COMPILE_LANGUAGE:CXX>:-Wall>)
+	if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+		target_compile_options(${PROJECT_NAME} PRIVATE
+			$<$<COMPILE_LANGUAGE:CXX>:-Wno-nullability-completeness>)
+	endif()
 endif()
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -202,7 +214,7 @@ option(BUILD_SHARED_LIBS "Build shared library" OFF)
 add_subdirectory(core/deps/glm)
 target_link_libraries(${PROJECT_NAME} PRIVATE glm::glm)
 
-if(NOT APPLE AND USE_VULKAN)
+if(USE_VULKAN)
 	option(BUILD_EXTERNAL "Build external dependencies in /External" OFF)
 	add_subdirectory(core/deps/glslang)
 	target_link_libraries(${PROJECT_NAME} PRIVATE SPIRV)
@@ -216,7 +228,7 @@ if(NOT LIBRETRO)
 	    target_link_libraries(${PROJECT_NAME} PRIVATE ${ALSA_LIBRARIES})
 	endif()
 	
-	if(WIN32)
+	if(WIN32 AND NOT WINDOWS_STORE)
 		# Build SDL
 		file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/core/deps/SDL")
 		if(CMAKE_GENERATOR MATCHES "Visual Studio")
@@ -237,7 +249,9 @@ if(NOT LIBRETRO)
 		target_link_libraries(${PROJECT_NAME} PRIVATE "-static-libgcc -static-libstdc++")
 	endif()
 	
-	if((APPLE AND NOT IOS) OR WIN32)
+	if(WINDOWS_STORE)
+		find_package(SDL2 CONFIG REQUIRED)
+	elseif((APPLE AND NOT IOS) OR WIN32)
 	    find_package(SDL2 HINTS "${CMAKE_CURRENT_BINARY_DIR}/core/deps/SDL/cmake")
 	elseif(NOT ANDROID AND NOT IOS)
 	    find_package(SDL2)
@@ -262,9 +276,17 @@ if(NOT LIBRETRO)
 	endif()
 	
 	find_package(ZLIB)
-	if(TARGET ZLIB::ZLIB AND NOT ANDROID AND NOT WIN32)
+	if(TARGET ZLIB::ZLIB AND NOT ANDROID AND (NOT WIN32 OR WINDOWS_STORE))
 	    set(WITH_SYSTEM_ZLIB ON CACHE BOOL "Use system provided zlib library")
 	    target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
+	endif()
+	
+	find_package(Lua)
+	if(NOT APPLE AND LUA_FOUND)
+		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_LUA)
+	    target_include_directories(${PROJECT_NAME} PRIVATE ${LUA_INCLUDE_DIR} core/deps/luabridge/Source)
+	    list(TRANSFORM LUA_LIBRARIES REPLACE "\.dll" "")
+	    target_link_libraries(${PROJECT_NAME} PRIVATE ${LUA_LIBRARIES})
 	endif()
 endif()
 
@@ -372,6 +394,12 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
     endif()
 
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS} rt)
+endif()
+
+if(WINDOWS_STORE)
+	find_package(unofficial-angle CONFIG REQUIRED)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3)
+	target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::angle::libEGL unofficial::angle::libGLESv2)
 endif()
 
 if(ASAN)
@@ -504,6 +532,7 @@ if(NOT LIBRETRO)
 	target_sources(${PROJECT_NAME} PRIVATE core/deps/imgui/imgui.cpp core/deps/imgui/imgui_demo.cpp core/deps/imgui/imgui_draw.cpp core/deps/imgui/imgui_widgets.cpp)
 endif()
 target_sources(${PROJECT_NAME} PRIVATE core/deps/xbrz/xbrz.cpp)
+target_sources(${PROJECT_NAME} PRIVATE core/deps/md5/md5.cpp)
 
 if(LIBRETRO)
     target_include_directories(${PROJECT_NAME} PRIVATE core/deps/libretro-common/include)
@@ -615,6 +644,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         core/hw/maple/maple_jvs.cpp
         core/hw/mem/_vmem.cpp
         core/hw/mem/_vmem.h
+        core/hw/mem/mem_watch.cpp
+        core/hw/mem/mem_watch.h
         core/hw/modem/modem.cpp
         core/hw/modem/modem.h
         core/hw/modem/modem_regs.h
@@ -641,8 +672,9 @@ target_sources(${PROJECT_NAME} PRIVATE
         core/hw/naomi/naomi_roms.cpp
         core/hw/naomi/naomi_roms.h
         core/hw/naomi/naomi_roms_input.h
-        core/hw/pvr/drkPvr.cpp
         core/hw/pvr/helper_classes.h
+        core/hw/pvr/pvr.cpp
+        core/hw/pvr/pvr.h
         core/hw/pvr/pvr_mem.cpp
         core/hw/pvr/pvr_mem.h
         core/hw/pvr/pvr_regs.cpp
@@ -732,7 +764,9 @@ if(NOT LIBRETRO)
 	        core/input/gamepad_device.h
 	        core/input/keyboard_device.h
 	        core/input/mapping.cpp
-	        core/input/mapping.h)
+	        core/input/mapping.h
+	        core/input/mouse.cpp
+	        core/input/mouse.h)
 endif()
 
 if(WIN32)
@@ -761,8 +795,6 @@ if(NOT LIBRETRO)
 	        core/linux-dist/evdev.cpp
 	        core/linux-dist/evdev.h
 	        core/linux-dist/icon.h
-	        core/linux-dist/joystick.cpp
-	        core/linux-dist/joystick.h
 	        core/linux-dist/x11.cpp
 	        core/linux-dist/x11.h
 	        core/linux-dist/x11_keyboard.h)
@@ -784,10 +816,14 @@ endif()
 
 target_sources(${PROJECT_NAME} PRIVATE
         core/network/dns.cpp
+        core/network/ggpo.cpp
+        core/network/ggpo.h
         core/network/miniupnp.cpp
         core/network/miniupnp.h
         core/network/naomi_network.cpp
         core/network/naomi_network.h
+        core/network/net_handshake.cpp
+        core/network/net_handshake.h
         core/network/net_platform.h
         core/network/picoppp.cpp
         core/network/picoppp.h)
@@ -817,7 +853,9 @@ target_sources(${PROJECT_NAME} PRIVATE
         core/oslib/audiostream.h
         core/oslib/directory.h
         core/oslib/host_context.h
-        core/oslib/oslib.h)
+        core/oslib/oslib.h
+        core/lua/lua.cpp
+        core/lua/lua.h)
 
 target_sources(${PROJECT_NAME} PRIVATE
         core/profiler/profiler.cpp
@@ -873,6 +911,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         core/emulator.h
         core/nullDC.cpp
         core/serialize.cpp
+        core/serialize.h
         core/stdclass.cpp
         core/stdclass.h
         core/types.h
@@ -900,15 +939,20 @@ if(NOT LIBRETRO)
 	target_sources(${PROJECT_NAME} PRIVATE
 	        core/rend/gles/imgui_impl_opengl3.cpp
 	        core/rend/gles/imgui_impl_opengl3.h
+	        core/rend/gles/opengl_driver.cpp
+	        core/rend/gles/opengl_driver.h
 	        core/rend/game_scanner.h
+	        core/rend/imgui_driver.h
 	        core/rend/gui.cpp
 	        core/rend/gui.h
 	        core/rend/gui_android.cpp
 	        core/rend/gui_android.h
+	        core/rend/gui_chat.h
 	        core/rend/gui_cheats.cpp
 	        core/rend/gui_util.cpp
 	        core/rend/gui_util.h
-	        core/rend/mainui.cpp)
+	        core/rend/mainui.cpp
+	        core/rend/mainui.h)
 endif()
 
 if(NOT (APPLE OR ANDROID OR USE_GLES OR USE_GLES2))
@@ -919,7 +963,7 @@ if(NOT (APPLE OR ANDROID OR USE_GLES OR USE_GLES2))
     	core/rend/gl4/gles.cpp)
 endif()
 
-if(USE_VULKAN AND NOT APPLE)
+if(USE_VULKAN)
 	if(NOT LIBRETRO)
 	    if(ANDROID)
 	        set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_ANDROID_KHR)
@@ -927,6 +971,8 @@ if(USE_VULKAN AND NOT APPLE)
 	        set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_XLIB_KHR)
 	    elseif(WIN32)
 	        set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_WIN32_KHR)
+		elseif(APPLE)
+	        set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_MACOS_MVK)
 	    endif()
 	
 	    set(VOLK_PULL_IN_VULKAN OFF)
@@ -978,13 +1024,14 @@ if(USE_VULKAN AND NOT APPLE)
 	            core/deps/libretro-common/vulkan/vulkan_symbol_wrapper.c)
 	else()
 	    target_sources(${PROJECT_NAME} PRIVATE
+	            core/rend/vulkan/vulkan_driver.h
 	            core/rend/vulkan/vulkan_context.cpp
 	            core/rend/vulkan/imgui_impl_vulkan.cpp
 	            core/rend/vulkan/imgui_impl_vulkan.h)
 	endif()
 endif()
 
-if(WIN32 AND NOT LIBRETRO)
+if(WIN32 AND NOT LIBRETRO AND NOT WINDOWS_STORE)
 	target_sources(${PROJECT_NAME} PRIVATE
 		core/rend/dx9/comptr.h
 		core/rend/dx9/d3d_overlay.h
@@ -995,6 +1042,7 @@ if(WIN32 AND NOT LIBRETRO)
 		core/rend/dx9/d3d_shaders.cpp
 		core/rend/dx9/d3d_texture.h
 		core/rend/dx9/d3d_texture.cpp
+		core/rend/dx9/dx9_driver.h
 		core/rend/dx9/dxcontext.h
 		core/rend/dx9/dxcontext.cpp
 		core/rend/dx9/imgui_impl_dx9.h
@@ -1116,6 +1164,45 @@ if(NOT KNOWN_ARCHITECTURE_DETECTED)
 endif()
 
 if(NOT LIBRETRO)
+	target_include_directories(${PROJECT_NAME} PRIVATE core/deps/ggpo/include core/deps/ggpo/lib/ggpo)
+	target_sources(${PROJECT_NAME} PRIVATE
+		core/deps/ggpo/lib/ggpo/bitvector.cpp
+		core/deps/ggpo/lib/ggpo/bitvector.h
+		core/deps/ggpo/lib/ggpo/game_input.cpp
+		core/deps/ggpo/lib/ggpo/game_input.h
+		core/deps/ggpo/lib/ggpo/input_queue.cpp
+		core/deps/ggpo/lib/ggpo/input_queue.h
+		core/deps/ggpo/lib/ggpo/log.cpp
+		core/deps/ggpo/lib/ggpo/log.h
+		core/deps/ggpo/lib/ggpo/main.cpp
+		core/deps/ggpo/lib/ggpo/platform_linux.cpp
+		core/deps/ggpo/lib/ggpo/platform_linux.h
+		core/deps/ggpo/lib/ggpo/platform_windows.cpp
+		core/deps/ggpo/lib/ggpo/platform_windows.h
+		core/deps/ggpo/lib/ggpo/poll.cpp
+		core/deps/ggpo/lib/ggpo/ggpo_poll.h
+		core/deps/ggpo/lib/ggpo/ring_buffer.h
+		core/deps/ggpo/lib/ggpo/static_buffer.h
+		core/deps/ggpo/lib/ggpo/sync.cpp
+		core/deps/ggpo/lib/ggpo/sync.h
+		core/deps/ggpo/lib/ggpo/timesync.cpp
+		core/deps/ggpo/lib/ggpo/timesync.h
+		core/deps/ggpo/lib/ggpo/ggpo_types.h
+		
+		core/deps/ggpo/lib/ggpo/backends/backend.h
+		core/deps/ggpo/lib/ggpo/backends/p2p.cpp
+		core/deps/ggpo/lib/ggpo/backends/p2p.h
+		core/deps/ggpo/lib/ggpo/backends/spectator.cpp
+		core/deps/ggpo/lib/ggpo/backends/spectator.h
+		core/deps/ggpo/lib/ggpo/backends/synctest.cpp
+		core/deps/ggpo/lib/ggpo/backends/synctest.h
+		
+		core/deps/ggpo/lib/ggpo/network/udp_msg.h
+		core/deps/ggpo/lib/ggpo/network/udp_proto.cpp
+		core/deps/ggpo/lib/ggpo/network/udp_proto.h
+		core/deps/ggpo/lib/ggpo/network/udp.cpp
+		core/deps/ggpo/lib/ggpo/network/udp.h)
+
 	if(ANDROID)
 	    target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES3)
 	
@@ -1126,7 +1213,6 @@ if(NOT LIBRETRO)
 		set_property(TARGET ${PROJECT_NAME} PROPERTY XCODE_ATTRIBUTE_SWIFT_VERSION "5.0")
 		if(IOS)
 			add_subdirectory(shell/apple/emulator-ios/AltKit)
-			target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/shell/apple/emulator-ios")
 			target_link_libraries(${PROJECT_NAME} PRIVATE AltKit)
 
 			target_sources(${PROJECT_NAME} PRIVATE
@@ -1211,13 +1297,9 @@ if(NOT LIBRETRO)
 				COMMAND rm -rf ${CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE}/Flycast.app ${CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE}/Flycast.swiftmodule)
 		else()
 			target_sources(${PROJECT_NAME} PRIVATE
-					shell/apple/emulator-osx/emulator-osx/AppDelegate.swift
-					shell/apple/emulator-osx/emulator-osx/EmuGLView.swift
-					shell/apple/emulator-osx/emulator-osx/osx-main.mm
-					shell/apple/emulator-osx/emulator-osx/osx_gamepad.h
-					shell/apple/emulator-osx/emulator-osx/osx_keyboard.h)
-		
-			set(XIB shell/apple/emulator-osx/emulator-osx/Base.lproj/MainMenu.xib)
+					shell/apple/emulator-osx/emulator-osx/SDLMain.h
+					shell/apple/emulator-osx/emulator-osx/SDLMain.mm
+					shell/apple/emulator-osx/emulator-osx/osx-main.mm)
 			set(ASSETS shell/apple/emulator-osx/emulator-osx/Images.xcassets)
 			target_sources(${PROJECT_NAME} PRIVATE ${XIB} ${ASSETS})
 			source_group("Resources" FILES ${XIB} ${ASSETS})
@@ -1237,8 +1319,6 @@ if(NOT LIBRETRO)
 				MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
 				MACOSX_BUNDLE_BUNDLE_VERSION "1"
 				MACOSX_BUNDLE_COPYRIGHT "Copyright © 2019 Flycast contributors. All rights reserved."
-				XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER "shell/apple/emulator-osx/emulator-osx/emulator-osx-Bridging-Header.h"
-				RESOURCE "${XIB}"
 				XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
 				BUILD_WITH_INSTALL_RPATH TRUE
 				INSTALL_RPATH "@loader_path/../Frameworks"
@@ -1248,8 +1328,21 @@ if(NOT LIBRETRO)
 			find_library(FOUNDATION_LIBRARY Foundation)
 			find_library(AUDIO_TOOLBOX_LIBRARY AudioToolbox)
 			find_library(MULTITOUCH_SUPPORT_LIBRARY MultitouchSupport /System/Library/PrivateFrameworks)
-		
-			target_link_libraries(${PROJECT_NAME} PRIVATE ${AUDIO_UNIT_LIBRARY} ${FOUNDATION_LIBRARY} ${AUDIO_TOOLBOX_LIBRARY} ${MULTITOUCH_SUPPORT_LIBRARY})
+			find_library(OPENGL_LIBRARY OpenGL)
+			find_library(IOSURFACE_LIBRARY IOSurface)
+
+			target_link_libraries(${PROJECT_NAME} PRIVATE
+				${AUDIO_UNIT_LIBRARY}
+				${FOUNDATION_LIBRARY}
+				${AUDIO_TOOLBOX_LIBRARY}
+				${MULTITOUCH_SUPPORT_LIBRARY}
+				${OPENGL_LIBRARY}
+				${IOSURFACE_LIBRARY})
+
+			set(output_dir $<$<CONFIG:Release>:${CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE}>$<$<CONFIG:RelWithDebInfo>:${CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO}>$<$<CONFIG:MinSizeRel>:${CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL}>$<$<CONFIG:Debug>:${CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG}>)
+			add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            	COMMAND ${CMAKE_COMMAND} -E copy "$ENV{VULKAN_SDK}/lib/libMoltenVK.dylib"
+            		${CMAKE_CURRENT_BINARY_DIR}/$<$<STREQUAL:$<GENEX_EVAL:${output_dir}>,>:$<CONFIG>>${output_dir}/Flycast.app/Contents/Frameworks/libvulkan.dylib)
 		endif()
 	elseif(UNIX OR NINTENDO_SWITCH)
 	    if(NOT BUILD_TESTING)
@@ -1265,9 +1358,24 @@ if(NOT LIBRETRO)
 	            core/windows/winmain.cpp
 	            core/windows/xinput_gamepad.h)
 	    endif()
-	    target_sources(${PROJECT_NAME} PRIVATE shell/windows/flycast.rc)
-
-	    target_link_libraries(${PROJECT_NAME} PRIVATE dsound opengl32 winmm ws2_32 wsock32 xinput9_1_0)
+		if(WINDOWS_STORE)
+			set(ResourceFiles shell/uwp/Package.appxmanifest
+					shell/uwp/flycast150.png
+					shell/uwp/flycast50.png
+					shell/uwp/flycast44.png
+					shell/uwp/splash.png
+					shell/uwp/flycast44.targetsize-48_altform-unplated.png
+					shell/uwp/flycast44.targetsize-48_altform-lightunplated.png
+					core/deps/SDL/src/main/winrt/SDL2-WinRTResource_BlankCursor.cur
+					core/deps/SDL/src/main/winrt/SDL2-WinRTResources.rc)
+			target_sources(${PROJECT_NAME} PRIVATE
+				${ResourceFiles}
+				core/deps/SDL/src/main/winrt/SDL_winrt_main_NonXAML.cpp)
+			set_target_properties(${PROJECT_NAME} PROPERTIES RESOURCE "${ResourceFiles}")
+		else()
+			target_sources(${PROJECT_NAME} PRIVATE shell/windows/flycast.rc)
+			target_link_libraries(${PROJECT_NAME} PRIVATE dsound opengl32 winmm ws2_32 wsock32 xinput9_1_0)
+		endif()
 	endif()
 endif()
 
@@ -1277,6 +1385,8 @@ if(BUILD_TESTING)
             core/deps/gtest/src/gtest_main.cc)
 
     target_sources(${PROJECT_NAME} PRIVATE
+            tests/src/CheatManagerTest.cpp
+            tests/src/ConfigFileTest.cpp
             tests/src/div32_test.cpp
             tests/src/test_stubs.cpp
             tests/src/serialize_test.cpp

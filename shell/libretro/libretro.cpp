@@ -116,6 +116,21 @@ u8 lt[4];
 u32 vks[4];
 s8 joyx[4], joyy[4];
 s8 joyrx[4], joyry[4];
+// Mouse buttons
+// bit 0: Button C
+// bit 1: Right button (B)
+// bit 2: Left button (A)
+// bit 3: Wheel button
+u8 mo_buttons[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+// Relative mouse coordinates [-512:511]
+f32 mo_x_delta[4];
+f32 mo_y_delta[4];
+f32 mo_wheel_delta[4];
+// Absolute mouse coordinates
+// Range [0:639] [0:479]
+// but may be outside this range if the pointer is offscreen or outside the 4:3 window.
+s32 mo_x_abs[4];
+s32 mo_y_abs[4];
 
 static bool enable_purupuru = true;
 static u32 vib_stop_time[4];
@@ -125,7 +140,6 @@ static double vib_delta[4];
 unsigned per_content_vmus = 0;
 
 static bool first_run = true;
-static bool mute_messages;
 static bool rotate_screen;
 static bool rotate_game;
 static int framebufferWidth;
@@ -150,8 +164,11 @@ static retro_rumble_interface rumble;
 static void refresh_devices(bool first_startup);
 static void init_disk_control_interface();
 static bool read_m3u(const char *file);
+void UpdateInputState();
+void gui_display_notification(const char *msg, int duration);
+static void updateVibration(u32 port, float power, float inclination, u32 durationMs);
 
-static char *game_data;
+static std::string game_data;
 static char g_base_name[128];
 static char game_dir[1024];
 char game_dir_no_slash[1024];
@@ -172,8 +189,6 @@ static unsigned disk_index = 0;
 static std::vector<std::string> disk_paths;
 static std::vector<std::string> disk_labels;
 static bool disc_tray_open = false;
-
-void UpdateInputState();
 
 void retro_set_video_refresh(retro_video_refresh_t cb)
 {
@@ -277,6 +292,7 @@ void retro_init()
 		ERROR_LOG(VMEM, "Cannot reserve memory space");
 
 	os_InstallFaultHandler();
+	MapleConfigMap::UpdateVibration = updateVibration;
 }
 
 void retro_deinit()
@@ -547,11 +563,10 @@ static void update_variables(bool first_startup)
 			config::RendererType = RenderType::OpenGL;
 		config::PerStripSorting = false;
 	}
-	config::RendererType.commit();
 	if (!first_startup && previous_renderer != config::RendererType) {
 		rend_term_renderer();
 		rend_init_renderer();
-		dc_resize_renderer();
+		rend_resize_renderer();
 	}
 
 	if (first_startup)
@@ -780,14 +795,10 @@ static void update_variables(bool first_startup)
 	{
 		if (wasThreadedRendering != config::ThreadedRendering)
 		{
-			if (config::ThreadedRendering)
-				dc_resume();
-			else
-			{
-				config::ThreadedRendering = true;
-				dc_stop();
-				config::ThreadedRendering = false;
-			}
+			config::ThreadedRendering = wasThreadedRendering;
+			emu.stop();
+			config::ThreadedRendering = !wasThreadedRendering;
+			emu.start();
 		}
 		bool geometryChanged = false;
 		if (rotate_screen != (prevRotateScreen ^ rotate_game))
@@ -805,14 +816,14 @@ static void update_variables(bool first_startup)
 			retro_system_av_info avinfo;
 			setAVInfo(avinfo);
 			environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avinfo);
-			dc_resize_renderer();
+			rend_resize_renderer();
 		}
 		else if (prevFramebufferWidth != framebufferWidth || prevFramebufferHeight != framebufferHeight || geometryChanged)
 		{
 			retro_game_geometry geometry;
 			setGameGeometry(geometry);
 			environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geometry);
-			dc_resize_renderer();
+			rend_resize_renderer();
 		}
 	}
 }
@@ -826,54 +837,42 @@ void retro_run()
 	if (devices_need_refresh)
 		refresh_devices(false);
 
-	if (config::RendererType.isOpenGL())
+	if (isOpenGL(config::RendererType))
 		glsm_ctl(GLSM_CTL_STATE_BIND, nullptr);
+
+	// On the first call, we start the emulator
+	if (first_run)
+	{
+		emu.start();
+		first_run = false;
+	}
 
 	poll_cb();
 	UpdateInputState();
+	bool fastforward = false;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastforward))
+		settings.input.fastForwardMode = fastforward;
 
-	if (config::ThreadedRendering)
-	{
-		bool fastforward = false;
-		if (environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastforward))
-			settings.input.fastForwardMode = fastforward;
-
-		// On the first call, we start the emulator thread
-		if (first_run)
+	try {
+		if (config::ThreadedRendering)
 		{
-			dc_resume();
-			first_run = false;
+			// Render
+			is_dupe = true;
+			for (int i = 0; i < 5 && is_dupe; i++)
+				is_dupe = !emu.render();
 		}
-
-		// Render
-		is_dupe = true;
-		for (int i = 0; i < 5 && is_dupe; i++)
-			is_dupe = !rend_single_frame(true);
-		// If emulator still isn't running, something's wrong
-		if (is_dupe && !dc_is_running())
+		else
 		{
-			std::string error = dc_get_last_error();
-			if (!error.empty())
-			{
-				gui_display_notification(error.c_str(), 5000);
-				WARN_LOG(COMMON, "Emulator thread has stopped: %s", error.c_str());
-				environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL);
-			}
+			startTime = sh4_sched_now64();
+			emu.render();
 		}
-	}
-	else
-	{
-		startTime = sh4_sched_now64();
-		try {
-			dc_run();
-		} catch (const FlycastException& e) {
-			ERROR_LOG(COMMON, "%s", e.what());
-			gui_display_notification(e.what(), 5000);
-			environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL);
-		}
+	} catch (const FlycastException& e) {
+		ERROR_LOG(COMMON, "%s", e.what());
+		gui_display_notification(e.what(), 5000);
+		environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL);
 	}
 
-	if (config::RendererType.isOpenGL())
+	if (isOpenGL(config::RendererType))
 		glsm_ctl(GLSM_CTL_STATE_UNBIND, nullptr);
 
 	video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, framebufferWidth, framebufferHeight, 0);
@@ -882,18 +881,15 @@ void retro_run()
 		is_dupe = true;
 }
 
-static bool loadGame(const char *path)
+static bool loadGame()
 {
-	mute_messages = true;
 	try {
-		dc_start_game(path);
+		emu.loadGame(game_data.c_str());
 	} catch (const FlycastException& e) {
 		ERROR_LOG(BOOT, "%s", e.what());
-		mute_messages = false;
 		gui_display_notification(e.what(), 5000);
 		return false;
 	}
-	mute_messages = false;
 
 	return true;
 }
@@ -902,11 +898,10 @@ void retro_reset()
 {
 	std::lock_guard<std::mutex> lock(mtx_serialization);
 
-	if (config::ThreadedRendering)
-		dc_stop();
+	emu.unloadGame();
 
 	config::ScreenStretching = 100;
-	loadGame(settings.imgread.ImagePath);
+	loadGame();
 	if (rotate_game)
 		config::Widescreen.override(false);
 	config::Rotate90 = false;
@@ -917,8 +912,7 @@ void retro_reset()
 	environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geometry);
 	blankVmus();
 
-	if (config::ThreadedRendering)
-		dc_resume();
+	emu.start();
 }
 
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
@@ -929,9 +923,9 @@ static void context_reset()
 	glsm_ctl(GLSM_CTL_STATE_CONTEXT_RESET, NULL);
 	glsm_ctl(GLSM_CTL_STATE_SETUP, NULL);
 	rend_term_renderer();
-	theGLContext.Init();
+	theGLContext.init();
 	rend_init_renderer();
-	dc_resize_renderer();
+	rend_resize_renderer();
 }
 
 static void context_destroy()
@@ -1383,16 +1377,16 @@ static void retro_vk_context_reset()
 		ERROR_LOG(RENDERER, "Get Vulkan HW interface failed");
 		return;
 	}
-	theVulkanContext.Init((retro_hw_render_interface_vulkan *)vulkan);
+	theVulkanContext.init((retro_hw_render_interface_vulkan *)vulkan);
 	rend_term_renderer();
 	rend_init_renderer();
-	dc_resize_renderer();
+	rend_resize_renderer();
 }
 
 static void retro_vk_context_destroy()
 {
 	rend_term_renderer();
-	theVulkanContext.Term();
+	theVulkanContext.term();
 }
 
 static bool set_vulkan_hw_render()
@@ -1421,7 +1415,6 @@ static bool set_vulkan_hw_render()
 		config::RendererType = RenderType::Vulkan;
 	else if (config::RendererType == RenderType::OpenGL_OIT)
 		config::RendererType = RenderType::Vulkan_OIT;
-	config::RendererType.commit();
 	return true;
 }
 #else
@@ -1478,7 +1471,6 @@ static bool set_opengl_hw_render(u32 preferred)
 		params.minor                 = preferred == RETRO_HW_CONTEXT_OPENGL_CORE ? 2 : 0;
 #endif
 		config::RendererType = RenderType::OpenGL;
-		config::RendererType.commit();
 	}
 
 	if (glsm_ctl(GLSM_CTL_STATE_CONTEXT_INIT, &params))
@@ -1494,7 +1486,6 @@ static bool set_opengl_hw_render(u32 preferred)
 	params.minor              = 0;
 #endif
 	config::RendererType = RenderType::OpenGL;
-	config::RendererType.commit();
 	return glsm_ctl(GLSM_CTL_STATE_CONTEXT_INIT, &params);
 #else
 	return false;
@@ -1592,7 +1583,7 @@ bool retro_load_game(const struct retro_game_info *game)
 		boot_to_bios = false;
 
 	if (boot_to_bios)
-		game_data = nullptr;
+		game_data.clear();
 	// if an m3u file was loaded, disk_paths will already be populated so load the game from there
 	else if (disk_paths.size() > 0)
 	{
@@ -1605,7 +1596,7 @@ bool retro_load_game(const struct retro_game_info *game)
 				&& disk_paths[disk_initial_index].compare(disk_initial_path) == 0)
 			disk_index = disk_initial_index;
 
-		game_data = strdup(disk_paths[disk_index].c_str());
+		game_data = disk_paths[disk_index];
 	}
 	else
 	{
@@ -1617,7 +1608,7 @@ bool retro_load_game(const struct retro_game_info *game)
 		fill_short_pathname_representation(disk_label, game->path, sizeof(disk_label));
 		disk_labels.push_back(disk_label);
 
-		game_data = strdup(game->path);
+		game_data = game->path;
 	}
 
 	{
@@ -1691,7 +1682,7 @@ bool retro_load_game(const struct retro_game_info *game)
 	}
 
 	config::ScreenStretching = 100;
-	if (!loadGame(game_data))
+	if (!loadGame())
 		return false;
 
 	rotate_game = config::Rotate90;
@@ -1717,15 +1708,14 @@ void retro_unload_game()
 {
 	INFO_LOG(COMMON, "Flycast unloading game");
 	frontend_clear_thread_waits_cb(1, nullptr);
-	dc_stop();
+	emu.stop();
 	frontend_clear_thread_waits_cb(0, nullptr);
-	free(game_data);
-	game_data = nullptr;
+	game_data.clear();
 	disk_paths.clear();
 	disk_labels.clear();
 	blankVmus();
 
-	dc_term_emulator();
+	emu.term();
 }
 
 
@@ -1744,87 +1734,51 @@ size_t retro_get_memory_size(unsigned type)
    return 0;
 }
 
-static bool wait_until_dc_running()
-{
-	retro_time_t start_time = perf_cb.get_time_usec();
-	const retro_time_t FIVE_SECONDS = 5*1000000 ;
-	while(!dc_is_running())
-	{
-		if ( start_time+FIVE_SECONDS < perf_cb.get_time_usec() )
-		{
-			//timeout elapsed - dc not getting a chance to run - just bail
-			return false ;
-		}
-	}
-	return true ;
-}
-
 size_t retro_serialize_size()
 {
 	DEBUG_LOG(SAVESTATE, "retro_serialize_size");
 	std::lock_guard<std::mutex> lock(mtx_serialization);
-	if (config::ThreadedRendering)
-	{
-		if (!wait_until_dc_running())
-			return 0;
 
-		dc_stop();
-	}
+	emu.stop();
 
-	unsigned int total_size = 0;
-	void *data = nullptr;
+	Serializer ser;
+	dc_serialize(ser);
+	emu.start();
 
-	dc_serialize(&data, &total_size);
-
-	if (config::ThreadedRendering)
-		dc_resume();
-
-	return total_size;
+	return ser.size();
 }
 
 bool retro_serialize(void *data, size_t size)
 {
 	DEBUG_LOG(SAVESTATE, "retro_serialize %d bytes", (int)size);
 	std::lock_guard<std::mutex> lock(mtx_serialization);
-	if (config::ThreadedRendering)
-	{
-		if ( !wait_until_dc_running())
-			return false;
 
-		dc_stop();
-	}
+	emu.stop();
 
-	unsigned int total_size = 0;
-	bool result = dc_serialize(&data, &total_size);
+	Serializer ser(data, size);
+	dc_serialize(ser);
+	emu.start();
 
-	if (config::ThreadedRendering)
-		dc_resume();
-
-	return result;
+	return true;
 }
 
 bool retro_unserialize(const void * data, size_t size)
 {
 	DEBUG_LOG(SAVESTATE, "retro_unserialize");
-    if (config::ThreadedRendering)
-    {
-    	mtx_serialization.lock();
-    	if ( !wait_until_dc_running()) {
-        	mtx_serialization.unlock();
-        	return false;
-    	}
-  		dc_stop();
-    }
+	std::lock_guard<std::mutex> lock(mtx_serialization);
 
-    bool result = dc_loadstate(&data, size);
+	emu.stop();
 
-    if (config::ThreadedRendering)
-    {
-    	mtx_serialization.unlock();
-    	dc_resume();
-    }
+	try {
+		Deserializer deser(data, size);
+		dc_loadstate(deser);
+		emu.start();
 
-    return result;
+		return true;
+	} catch (const Deserializer::Exception& e) {
+		ERROR_LOG(SAVESTATE, "Loading state failed: %s", e.what());
+		return false;
+	}
 }
 
 // Cheats
@@ -1979,13 +1933,6 @@ void retro_rend_present()
 		is_dupe = false;
 		sh4_cpu.Stop();
 	}
-}
-
-void retro_rend_vblank()
-{
-	// Time out if a frame hasn't been rendered for 50 ms
-	if (!config::ThreadedRendering && is_dupe && sh4_sched_now64() - startTime > 10000000)
-		sh4_cpu.Stop();
 }
 
 static uint32_t get_time_ms()
@@ -2640,7 +2587,7 @@ void UpdateInputState()
 	UpdateInputState(3);
 }
 
-void UpdateVibration(u32 port, float power, float inclination, u32 durationMs)
+static void updateVibration(u32 port, float power, float inclination, u32 durationMs)
 {
 	if (!rumble.set_rumble_state)
 		return;
@@ -2652,8 +2599,8 @@ void UpdateVibration(u32 port, float power, float inclination, u32 durationMs)
 	vib_delta[port] = inclination;
 }
 
-extern u8 kb_key[4][6];	// normal keys pressed
-extern u8 kb_shift[4];	// modifier keys pressed (bitmask)
+u8 kb_key[4][6];	// normal keys pressed
+u8 kb_shift[4];	// modifier keys pressed (bitmask)
 static int kb_used;
 
 static void release_key(unsigned dc_keycode)
@@ -2777,7 +2724,7 @@ static bool retro_set_eject_state(bool ejected)
 	else
 	{
 		try {
-			return DiscSwap();
+			return DiscSwap(disk_paths[disk_index]);
 		} catch (const FlycastException& e) {
 			ERROR_LOG(GDROM, "%s", e.what());
 			return false;
@@ -2801,17 +2748,16 @@ static bool retro_set_image_index(unsigned index)
 	if (disk_index >= disk_paths.size())
 	{
 		// No disk in drive
-		settings.imgread.ImagePath[0] = '\0';
+		settings.content.path.clear();
 		return true;
 	}
-	strncpy(settings.imgread.ImagePath, disk_paths[index].c_str(), sizeof(settings.imgread.ImagePath));
-	settings.imgread.ImagePath[sizeof(settings.imgread.ImagePath) - 1] = '\0';
+	settings.content.path = disk_paths[index];
 
 	if (disc_tray_open)
 		return true;
 
 	try {
-		return DiscSwap();
+		return DiscSwap(settings.content.path);
 	} catch (const FlycastException& e) {
 		ERROR_LOG(GDROM, "%s", e.what());
 		return false;
@@ -2990,8 +2936,6 @@ static bool read_m3u(const char *file)
 
 void gui_display_notification(const char *msg, int duration)
 {
-	if (mute_messages)
-		return;
 	retro_message retromsg;
 	retromsg.msg = msg;
 	retromsg.frames = duration / 17;

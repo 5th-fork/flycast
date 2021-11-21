@@ -70,10 +70,6 @@ public:
 		cfgSetAutoSave(true);
 	}
 
-	const std::string& getGameId() const {
-		return gameId;
-	}
-
 	void setGameId(const std::string& gameId) {
 		this->gameId = gameId;
 	}
@@ -125,7 +121,7 @@ public:
 
 	void load() override {
 		if (PerGameOption && settings.hasPerGameConfig())
-			set(doLoad(settings.getGameId(), section + "." + name));
+			set(doLoad(settings.gameId, section + "." + name));
 		else
 		{
 			set(doLoad(section, name));
@@ -149,7 +145,7 @@ public:
 				return;
 		}
 		if (PerGameOption && settings.hasPerGameConfig())
-			doSave(settings.getGameId(), section + "." + name);
+			doSave(settings.gameId, section + "." + name);
 		else
 			doSave(section, name);
 	}
@@ -346,7 +342,7 @@ using OptionString = Option<std::string>;
 
 extern Option<bool> DynarecEnabled;
 extern Option<bool> DynarecIdleSkip;
-extern Option<bool> DynarecSafeMode;
+constexpr bool DynarecSafeMode = false;
 
 // General
 
@@ -364,7 +360,6 @@ extern Option<int> SavestateSlot;
 
 constexpr bool LimitFPS = true;
 extern Option<bool> DSPEnabled;
-extern Option<bool> DisableSound;
 extern Option<int> AudioBufferSize;	//In samples ,*4 for bytes
 extern Option<bool> AutoLatency;
 
@@ -399,49 +394,17 @@ extern AudioVolumeOption AudioVolume;
 class RendererOption : public Option<RenderType> {
 public:
 	RendererOption()
-#ifdef _WIN32
+#ifdef USE_DX9
 		: Option<RenderType>("pvr.rend", RenderType::DirectX9) {}
 #else
 		: Option<RenderType>("pvr.rend", RenderType::OpenGL) {}
 #endif
 
-	bool isOpenGL() const {
-		return value == RenderType::OpenGL || value == RenderType::OpenGL_OIT;
-	}
-	bool isVulkan() const {
-		return value == RenderType::Vulkan || value == RenderType::Vulkan_OIT;
-	}
 	bool isDirectX() const {
 		return value == RenderType::DirectX9;
 	}
 
-	void set(RenderType v)
-	{
-		newValue = v;
-	}
 	RenderType& operator=(const RenderType& v) { set(v); return value; }
-
-	void load() override {
-		RenderType current = value;
-		Option<RenderType>::load();
-		newValue = value;
-		value = current;
-	}
-
-	void reset() override {
-		// don't reset the value to avoid vk -> gl -> vk quick switching
-		overridden = false;
-	}
-
-	bool pendingChange() {
-		return newValue != value;
-	}
-	void commit() {
-		value = newValue;
-	}
-
-private:
-	RenderType newValue = RenderType();
 };
 extern RendererOption RendererType;
 extern Option<bool> UseMipmaps;
@@ -473,6 +436,7 @@ extern Option<bool> VSync;
 extern Option<u64> PixelBufferSize;
 extern Option<int> AnisotropicFiltering;
 extern Option<bool> ThreadedRendering;
+extern Option<bool> DupeFrames;
 
 // Misc
 
@@ -493,6 +457,11 @@ extern Option<bool> ActAsServer;
 extern OptionString DNS;
 extern OptionString NetworkServer;
 extern Option<bool> EmulateBBA;
+extern Option<bool> GGPOEnable;
+extern Option<int> GGPODelay;
+extern Option<bool> NetworkStats;
+extern Option<int> GGPOAnalogAxes;
+extern Option<bool> GGPOChat;
 
 #ifdef SUPPORT_DISPMANX
 extern Option<bool> DispmanxMaintainAspect;
@@ -514,6 +483,10 @@ extern Option<bool> UseRawInput;
 #else
 constexpr bool UseRawInput = false;
 #endif
+
+#ifdef USE_LUA
+extern OptionString LuaFileName;
+#endif 
 
 } // namespace config
 

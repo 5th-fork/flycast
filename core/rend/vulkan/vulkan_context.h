@@ -46,26 +46,24 @@ public:
 #include "quad.h"
 #include "rend/TexCache.h"
 #include "overlay.h"
-
-extern int screen_width, screen_height;
+#include "wsi/context.h"
 
 struct ImDrawData;
 void ImGui_ImplVulkan_RenderDrawData(ImDrawData *draw_data);
 static vk::Format findDepthFormat(vk::PhysicalDevice physicalDevice);
 
-class VulkanContext
+class VulkanContext : public GraphicsContext
 {
 public:
 	VulkanContext() { verify(contextInstance == nullptr); contextInstance = this; }
 	~VulkanContext() { verify(contextInstance == this); contextInstance = nullptr; }
 
-	bool Init();
-	void Term();
-	void SetWindow(void *window, void *display) { this->window = window; this->display = display; }
+	bool init();
+	void term() override;
 
 	VkInstance GetInstance() const { return static_cast<VkInstance>(instance.get()); }
 	u32 GetGraphicsQueueFamilyIndex() const { return graphicsQueueIndex; }
-	void SetResized() { resized = true; }
+	void resize() override { resized = true; }
 	bool IsValid() { return width != 0 && height != 0; }
 	void NewFrame();
 	void BeginRenderPass();
@@ -80,7 +78,7 @@ public:
 	vk::RenderPass GetRenderPass() const { return *renderPass; }
 	vk::CommandBuffer GetCurrentCommandBuffer() const { return *commandBuffers[GetCurrentImageIndex()]; }
 	vk::DescriptorPool GetDescriptorPool() const { return *descriptorPool; }
-	vk::Extent2D GetViewPort() const { return { (u32)screen_width, (u32)screen_height }; }
+	vk::Extent2D GetViewPort() const { return { (u32)settings.display.width, (u32)settings.display.height }; }
 	size_t GetSwapChainSize() const { return imageViews.size(); }
 	int GetCurrentImageIndex() const { return currentImage; }
 	void WaitIdle() const;
@@ -101,8 +99,8 @@ public:
 			return true;
 		}
 	}
-	std::string GetDriverName() const;
-	std::string GetDriverVersion() const;
+	std::string getDriverName() override;
+	std::string getDriverVersion() override;
 	vk::Format GetColorFormat() const { return colorFormat; }
 	vk::Format GetDepthFormat() const { return depthFormat; }
 	static VulkanContext *Instance() { return contextInstance; }
@@ -121,6 +119,7 @@ public:
 		graphicsQueue.submit(
 				vk::SubmitInfo(0, nullptr, nullptr, bufferCount, buffers), fence);
 	}
+	bool hasPerPixel() override { return fragmentStoresAndAtomics; }
 
 #ifdef VK_DEBUG
 	void setObjectName(u64 object, VkDebugReportObjectTypeEXT objectType, const std::string& name)
@@ -147,18 +146,12 @@ private:
 	void SetWindowSize(u32 width, u32 height);
 
 	VMAllocator allocator;
-	void *window = nullptr;
-	void *display = nullptr;
 	bool rendering = false;
 	bool renderDone = false;
 	u32 width = 0;
 	u32 height = 0;
 	bool resized = false;
-#ifndef TEST_AUTOMATION
 	bool swapOnVSync = true;
-#else
-	bool swapOnVSync = false;
-#endif
 	vk::UniqueInstance instance;
 	vk::PhysicalDevice physicalDevice;
 
@@ -177,6 +170,7 @@ private:
 	bool dedicatedAllocationSupported = false;
 	bool unifiedMemory = false;
 	u32 vendorID = 0;
+	int swapInterval = 1;
 	vk::UniqueDevice device;
 
 	vk::UniqueSurfaceKHR surface;
@@ -206,6 +200,7 @@ private:
 
 	vk::UniquePipelineCache pipelineCache;
 
+	std::unique_ptr<QuadPipeline> quadPipelineWithAlpha;
 	std::unique_ptr<QuadPipeline> quadPipeline;
 	std::unique_ptr<QuadPipeline> quadRotatePipeline;
 	std::unique_ptr<QuadDrawer> quadDrawer;
